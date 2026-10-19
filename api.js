@@ -1,6 +1,7 @@
 "use strict";
 
 const API_URL = "https://jsonplaceholder.typicode.com/posts";
+const MAX_TITLE_LENGTH = 100;
 
 const loadButton = document.querySelector("#load-btn");
 const statusElement = document.querySelector("#status");
@@ -10,8 +11,8 @@ const bodyInput = document.querySelector("#body-input");
 const submitButton = document.querySelector("#submit-btn");
 const notesList = document.querySelector("#notes-list");
 
-// JSONPlaceholder simulates POST and DELETE responses but does not persist
-// those changes. Keep a local in-memory list so changes are visible this session.
+// JSONPlaceholder simulates POST and DELETE but does not persist changes.
+// Locally created notes are tracked in memory and removed locally on delete.
 let notes = [];
 
 function setStatus(message, kind = "") {
@@ -19,10 +20,6 @@ function setStatus(message, kind = "") {
   statusElement.className = kind;
 }
 
-/**
- * Fetch JSON and reject unsuccessful HTTP responses.
- * A 204 response has no body, which is normal for a successful DELETE.
- */
 async function request(url, options = {}) {
   const response = await fetch(url, options);
 
@@ -34,12 +31,12 @@ async function request(url, options = {}) {
     return { data: null, status: response.status };
   }
 
-  const responseText = await response.text();
+  const text = await response.text();
   let data = null;
 
-  if (responseText) {
+  if (text) {
     try {
-      data = JSON.parse(responseText);
+      data = JSON.parse(text);
     } catch {
       throw new Error("The server returned an invalid response.");
     }
@@ -53,6 +50,7 @@ function renderNotes() {
 
   if (notes.length === 0) {
     const emptyItem = document.createElement("li");
+    emptyItem.className = "empty";
     emptyItem.textContent = "No notes to show. Load notes or create one.";
     notesList.append(emptyItem);
     return;
@@ -67,7 +65,7 @@ function renderNotes() {
 
     const body = document.createElement("p");
     body.className = "note-body";
-    body.textContent = note.body || "";
+    body.textContent = note.body || "(No body)";
 
     const meta = document.createElement("p");
     meta.className = "note-meta";
@@ -77,7 +75,7 @@ function renderNotes() {
     deleteButton.type = "button";
     deleteButton.className = "delete-btn";
     deleteButton.textContent = "Delete";
-    deleteButton.addEventListener("click", () => deleteNote(note.id, deleteButton));
+    deleteButton.addEventListener("click", () => deleteNote(note, deleteButton));
 
     item.append(title, body, meta, deleteButton);
     notesList.append(item);
@@ -95,7 +93,7 @@ async function loadNotes() {
       throw new Error("The server returned an unexpected notes list.");
     }
 
-    notes = data;
+    notes = data.map((note) => ({ ...note, isLocal: false }));
     renderNotes();
 
     if (notes.length === 0) {
@@ -103,8 +101,8 @@ async function loadNotes() {
     } else {
       setStatus(`Loaded ${notes.length} notes from the server.`, "success");
     }
-  } catch (error) {
-    setStatus(`Could not load notes. Please try again. ${error.message}`, "error");
+  } catch {
+    setStatus("Could not load notes. Please check your connection and try again.", "error");
   } finally {
     loadButton.disabled = false;
   }
@@ -122,7 +120,7 @@ async function createNote(event) {
     return;
   }
 
-  if (title.length > 100) {
+  if (title.length > MAX_TITLE_LENGTH) {
     setStatus("The title must be 100 characters or fewer.", "error");
     titleInput.focus();
     return;
@@ -134,46 +132,59 @@ async function createNote(event) {
   try {
     const { data, status } = await request(API_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=UTF-8"
-      },
-      body: JSON.stringify({
-        title,
-        body,
-        userId: 1
-      })
+      headers: { "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify({ title, body, userId: 1 })
     });
 
     if (!data || data.id === undefined) {
       throw new Error("The server did not return the created note.");
     }
 
-    notes.unshift(data);
+    // The practice API may return the same simulated ID for multiple POSTs.
+    // A unique local key lets each created note be removed correctly.
+    const createdNote = {
+      ...data,
+      localKey: crypto.randomUUID(),
+      isLocal: true
+    };
+
+    notes.unshift(createdNote);
     renderNotes();
     noteForm.reset();
     setStatus(`Note created (status ${status}, id ${data.id}).`, "success");
-  } catch (error) {
-    setStatus(`Could not create the note. Please try again. ${error.message}`, "error");
+  } catch {
+    setStatus("Could not create the note. Please try again.", "error");
   } finally {
     submitButton.disabled = false;
   }
 }
 
-async function deleteNote(id, button) {
+async function deleteNote(note, button) {
   button.disabled = true;
   setStatus("Deleting note...");
 
   try {
-    const { status } = await request(`${API_URL}/${encodeURIComponent(id)}`, {
-      method: "DELETE"
-    });
+    if (!note.isLocal) {
+      const { status } = await request(
+        `${API_URL}/${encodeURIComponent(note.id)}`,
+        { method: "DELETE" }
+      );
+      setStatus(`Note deleted (status ${status}, id ${note.id}).`, "success");
+    } else {
+      // This simulated POST was never persisted, so remove it from local state.
+      setStatus(`Note deleted locally (simulated id ${note.id}).`, "success");
+    }
 
-    notes = notes.filter((note) => String(note.id) !== String(id));
+    notes = notes.filter((item) =>
+      note.isLocal
+        ? item.localKey !== note.localKey
+        : !(item.id === note.id && !item.isLocal)
+    );
+
     renderNotes();
-    setStatus(`Note deleted (status ${status}, id ${id}).`, "success");
-  } catch (error) {
+  } catch {
     button.disabled = false;
-    setStatus(`Could not delete the note. Please try again. ${error.message}`, "error");
+    setStatus("Could not delete the note. Please try again.", "error");
   }
 }
 
