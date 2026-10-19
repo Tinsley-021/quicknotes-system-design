@@ -15,19 +15,11 @@
       <p>A browser client practicing the JSONPlaceholder posts API.</p>
     </header>
 
-    <p id="status" role="status" aria-live="polite"></p>
-
     <section aria-labelledby="create-heading">
       <h2 id="create-heading">Create a note</h2>
       <form id="note-form">
         <label for="title-input">Title (required; 100 characters maximum)</label>
-        <input
-          id="title-input"
-          name="title"
-          type="text"
-          maxlength="100"
-          required
-        >
+        <input id="title-input" name="title" type="text" maxlength="100" required>
 
         <label for="body-input">Body (optional)</label>
         <textarea id="body-input" name="body" rows="4"></textarea>
@@ -39,6 +31,7 @@
     <section aria-labelledby="notes-heading">
       <h2 id="notes-heading">Notes</h2>
       <button id="load-btn" type="button">Load notes</button>
+      <p id="status" role="status" aria-live="polite"></p>
       <ul id="notes-list"></ul>
     </section>
   </main>
