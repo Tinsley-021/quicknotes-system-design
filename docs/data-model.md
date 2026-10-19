@@ -1,68 +1,58 @@
 # QuickNotes Data Model
 
-The initial data store is PostgreSQL. UUIDs identify records, and timestamps
-are stored in UTC.
+QuickNotes uses PostgreSQL. Users, notes, and tags have clear relationships,
+and relational constraints help enforce ownership and data integrity.
 
 ## Entities and relationships
 
-- **users:** One user can own many notes and many tags.
-- **notes:** Each note belongs to exactly one user.
-- **tags:** Each tag belongs to exactly one user, so users can have independent
-  tag names.
-- **note_tags:** Join table connecting notes and tags. Notes and tags have a
-  many-to-many relationship: a note can have many tags, and a tag can label
-  many notes.
+- **users**: account owners.
+- **notes**: each note belongs to one user; one user can own many notes
+  (one-to-many).
+- **tags**: labels owned by a user.
+- **note_tags**: joins notes and tags; notes and tags have a many-to-many
+  relationship.
 
-## CREATE TABLE statements
+## Schema
 
 ```sql
 CREATE TABLE users (
-    id UUID PRIMARY KEY,
-    email VARCHAR(320) NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE notes (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    title VARCHAR(100) NOT NULL,
-    body TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title VARCHAR(100) NOT NULL CHECK (char_length(title) BETWEEN 1 AND 100),
+  body TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE tags (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name VARCHAR(50) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (user_id, name)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name VARCHAR(50) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, name)
 );
 
 CREATE TABLE note_tags (
-    note_id UUID NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
-    tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-    PRIMARY KEY (note_id, tag_id)
+  note_id UUID NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (note_id, tag_id)
 );
 ```
 
-## Indexes
-
-```sql
-CREATE INDEX notes_user_updated_idx
-    ON notes (user_id, updated_at DESC);
-
-CREATE INDEX note_tags_tag_id_idx
-    ON note_tags (tag_id);
-```
-
-The notes index speeds up listing a user's notes in recently updated order.
-The `note_tags` index supports finding notes associated with a tag.
+The composite primary key on `note_tags` prevents the same tag from being
+attached to the same note twice.
 
 ## Example queries
 
-List a user's newest notes:
+List a user's notes, newest first:
 
 ```sql
 SELECT id, title, body, created_at, updated_at
@@ -72,41 +62,51 @@ ORDER BY updated_at DESC
 LIMIT 20;
 ```
 
-Create a note:
+Find a user's notes with a particular tag (JOIN):
 
 ```sql
-INSERT INTO notes (id, user_id, title, body)
-VALUES ($1, $2, $3, $4)
-RETURNING id, title, body, created_at, updated_at;
-```
-
-List notes with their tags (JOIN):
-
-```sql
-SELECT n.id, n.title, t.id AS tag_id, t.name AS tag_name
+SELECT n.id, n.title, n.body
 FROM notes AS n
-LEFT JOIN note_tags AS nt ON nt.note_id = n.id
-LEFT JOIN tags AS t ON t.id = nt.tag_id
+JOIN note_tags AS nt ON nt.note_id = n.id
+JOIN tags AS t ON t.id = nt.tag_id
 WHERE n.user_id = $1
+  AND t.name = $2
 ORDER BY n.updated_at DESC;
 ```
 
-Attach a tag to a note, ensuring both belong to the same user:
+Count notes for a user:
 
 ```sql
-INSERT INTO note_tags (note_id, tag_id)
-SELECT n.id, t.id
-FROM notes AS n
-JOIN tags AS t ON t.user_id = n.user_id
-WHERE n.id = $1 AND t.id = $2 AND n.user_id = $3
-ON CONFLICT DO NOTHING;
+SELECT COUNT(*) AS note_count
+FROM notes
+WHERE user_id = $1;
 ```
 
-## SQL or NoSQL?
+List tags attached to a note:
 
-Use a relational SQL database such as PostgreSQL for the primary data store.
-QuickNotes benefits from transactions, foreign keys, unique constraints, and
-joins between users, notes, and tags. At this scale, indexes, caching, and
-read replicas are reasonable first scaling steps; a NoSQL database would add
-relationship-management and consistency trade-offs without a demonstrated
-need.
+```sql
+SELECT t.id, t.name
+FROM tags AS t
+JOIN note_tags AS nt ON nt.tag_id = t.id
+WHERE nt.note_id = $1
+ORDER BY t.name;
+```
+
+## Indexes
+
+```sql
+CREATE INDEX idx_notes_user_updated
+ON notes (user_id, updated_at DESC);
+```
+
+The main list query filters by `user_id` and sorts by `updated_at`, so this
+index helps retrieve a user's newest notes without scanning and sorting every
+note. Primary keys and unique constraints also create indexes.
+
+## SQL versus NoSQL
+
+SQL is a good fit because the data has stable relationships, ownership rules,
+and integrity requirements. PostgreSQL enforces foreign keys and uniqueness,
+and joins make tag queries straightforward. NoSQL could be reconsidered if
+the product later needs highly variable note structures or a distribution
+model that makes relational storage unsuitable.
