@@ -2,167 +2,140 @@
 
 ## Requirements
 
-### Functional requirements
+### Functional
 
-- Users can register, authenticate, and manage their notes.
-- Users can create, read, update, and delete notes.
-- Users can list their notes and organize them with tags.
-- The service validates requests and returns consistent error responses.
+- Users can register, log in, and manage their sessions.
+- Users can create, read, update, delete, search, and tag notes.
+- Notes are private to their owner and sync across the user's devices.
+- Users can access the service from a browser or mobile client.
 
-### Non-functional requirements
+### Non-functional
 
-- Support approximately one million registered users.
-- Keep common note-list requests responsive under normal and peak load.
-- Preserve acknowledged writes and recover from component failures.
-- Protect user data with authentication, authorization, backups, and encryption
-  in transit.
-- Monitor latency, traffic, errors, resource use, and cache effectiveness.
+- Target 99.9% service availability.
+- Most note-list requests should complete within 300 ms.
+- Protect accounts and notes with authentication, authorization, and TLS.
+- Back up data and support database failover.
+- Scale application capacity horizontally as traffic grows.
 
 ## Load estimate
 
-Assumptions:
+Assumptions: 1,000,000 registered users; 20% daily active users; each active
+user loads notes 20 times and creates 5 notes per day.
 
-- 1,000,000 registered users.
-- 20% use the service on a given day.
-- Each daily active user creates 5 notes and loads notes 20 times per day.
-- An average note, including metadata, is 500 bytes.
-- Use 86,400 seconds per day and estimate peak load as 5× average.
-- Storage excludes indexes, backups, replication, and future growth.
+- Daily active users: 1,000,000 × 20% = 200,000.
+- Reads: 200,000 × 20 = 4,000,000/day, about **46 reads/second average**.
+- Writes: 200,000 × 5 = 1,000,000/day, about **12 writes/second average**.
+- Plan for roughly 5× peak traffic: about **230 reads/second** and
+  **60 writes/second**.
+- Storage: assume 1,000,000 notes/day × 1 KB per stored note including
+  indexes and metadata = about 1 GB/day, or **365 GB/year**, before replicas
+  and backups.
 
-Daily active users:
-
-```text
-1,000,000 × 20% = 200,000 DAU
-```
-
-Writes:
-
-```text
-200,000 × 5 = 1,000,000 writes/day
-1,000,000 ÷ 86,400 ≈ 11.6 writes/second average
-11.6 × 5 ≈ 58 writes/second peak
-```
-
-Reads:
-
-```text
-200,000 × 20 = 4,000,000 reads/day
-4,000,000 ÷ 86,400 ≈ 46.3 reads/second average
-46.3 × 5 ≈ 232 reads/second peak
-```
-
-Storage:
-
-```text
-1,000,000 notes/day × 500 bytes = 500 MB/day
-500 MB/day × 365 = 182,500 MB/year ≈ 183 GB/year
-```
-
-This is a read-heavy system: the estimate has four reads per write. Caching and
-read replicas can reduce database read load, while writes go to the primary
-database.
+These estimates are planning assumptions and should be revised using
+production measurements.
 
 ## Architecture diagram
 
 ```text
-                         ┌──────────────┐
-                         │     DNS      │
-                         └──────┬───────┘
-                                │
-                    ┌───────────┴───────────┐
-                    │                       │
-                    v                       v
-          ┌──────────────────┐     ┌──────────────────┐
-          │ Client/browser   │────>│ CDN              │
-          │ or mobile app    │     │ HTML/CSS/JS      │
-          └────────┬─────────┘     └──────────────────┘
-                   │ API requests
-                   v
-             ┌───────────────┐
-             │ Load balancer │
-             └───────┬───────┘
-                     │
-                ┌────┴────┐
-                v         v
-           ┌────────┐ ┌────────┐
-           │ App 1  │ │ App 2  │
-           └──┬──┬──┘ └──┬──┬──┘
-              │  │       │  │
-              │  └───────┴──┴──────>┌────────────┐
-              │                      │ Cache      │
-              │                      │ (Redis)    │
-              │                      └────────────┘
-              │ writes      reads
-              v             v
-        ┌─────────────┐  ┌─────────────┐
-        │ Primary DB  │─>│ Read replica│
-        └──────┬──────┘  └─────────────┘
-               │
-               │ background jobs
-               v
-        ┌─────────────┐     ┌─────────────┐
-        │ Job queue   │────>│ Worker      │
-        └─────────────┘     └─────────────┘
+                   ┌─────────────────────┐
+                   │ Browser / mobile app│
+                   └──────────┬──────────┘
+                              │
+                    DNS: api.quicknotes.com
+                              │
+                    ┌─────────▼─────────┐
+                    │ CDN (static assets)│
+                    └─────────┬─────────┘
+                              │ HTTPS API requests
+                    ┌─────────▼─────────┐
+                    │ Load balancer pair│
+                    └──────┬───────┬────┘
+                           │       │
+                  ┌────────▼─┐   ┌─▼────────┐
+                  │App server│   │App server│
+                  │    1     │   │    2     │
+                  └─────┬────┘   └────┬─────┘
+                        └──────┬──────┘
+                               │
+                     ┌─────────▼─────────┐
+                     │ Cache (Redis HA)  │
+                     └─────────┬─────────┘
+                               │
+                  ┌────────────▼────────────┐
+                  │ Primary database        │
+                  │       PostgreSQL        │
+                  └────────────┬────────────┘
+                               │ replication
+                  ┌────────────▼────────────┐
+                  │ PostgreSQL read replica │
+                  └─────────────────────────┘
+
+         App servers ──> Queue ──> Worker ──> Email / export jobs
+         Primary DB ──> Backups in separate object storage
 ```
 
 ## Components
 
-- **Client:** Displays the application and sends HTTPS requests to the API.
-- **DNS:** Resolves the service hostname so clients can reach the CDN and API.
-- **CDN:** Serves static front-end assets close to users, reducing latency and
-  origin traffic.
-- **Load balancer:** Distributes API requests across healthy app servers and
-  stops routing to unhealthy instances.
-- **App servers:** Run stateless API logic so any healthy instance can handle
-  any request.
-- **Cache:** Stores frequently read note lists in memory to reduce database
-  load and response time.
-- **Primary database:** Stores authoritative data and accepts writes.
-- **Read replica:** Serves eligible read queries to increase read capacity;
-  replication lag can briefly make it stale.
-- **Job queue:** Buffers slow or retryable work so it does not delay the
-  user-facing response.
-- **Worker:** Processes queued background jobs independently of API requests.
+| Component | Problem it solves |
+|---|---|
+| DNS | Resolves the API hostname to the service's network address. |
+| CDN | Serves static files near users and reduces origin traffic. |
+| Load balancer pair | Distributes API requests and routes around unhealthy app servers. |
+| App servers | Run API logic and scale horizontally as request volume grows. |
+| Redis cache | Speeds up frequently requested note lists and reduces database reads. |
+| Primary database | Provides the authoritative source for writes and transactions. |
+| Read replica | Serves read traffic and can support database failover. |
+| Queue | Holds slow or retryable work outside the user's request path. |
+| Worker | Processes queued email, export, and other background jobs. |
+| Backups | Allow recovery from data loss, operator mistakes, or corruption. |
 
-## GET /notes flow
+## Request flows
 
-1. The client sends `GET /v1/notes` through the load balancer.
-2. The load balancer selects a healthy app server.
-3. The app server authenticates the user and checks the cache for that user's
-   note list.
-4. On a cache hit, the app returns the cached result.
-5. On a cache miss, the app reads from the read replica, caches the result with
-   a time-to-live, and returns it.
-6. If a replica is unavailable, the service can fall back to the primary under
-   a controlled policy. Read-after-write requests can go to the primary.
+### `GET /v1/notes`
 
-## POST /notes flow
+1. The client sends an HTTPS request with its access token.
+2. DNS resolves the API hostname; the load balancer selects a healthy app server.
+3. The app server validates the token and determines the authenticated user ID.
+4. The app checks the cache using a user-scoped key such as
+   `notes:<user-id>:<cursor>`.
+5. On a cache hit, the app returns the cached page with `200 OK`.
+6. On a cache miss, the app queries the read replica, caches the result with a
+   short TTL, and returns `200 OK`.
+7. The app never uses a client-supplied user ID to authorize access.
 
-1. The client sends `POST /v1/notes` with a JSON body through the load balancer.
-2. The app server authenticates the user and validates the title and body.
-3. The app writes the note to the primary database and waits for confirmation.
-4. The app invalidates the user's cached note list so the next read can fetch
-   fresh data.
-5. The app returns `201 Created` with the saved note.
-6. If extra work is required, the app adds a job to the queue for a worker to
-   process asynchronously.
+### `POST /v1/notes`
 
-## Trade-offs and single points of failure
+1. The client sends an HTTPS request with its access token and JSON note data.
+2. The load balancer forwards the request to a healthy app server.
+3. The app validates the token and request fields; invalid fields return
+   `400 Bad Request`.
+4. The app inserts the note into the primary database in a transaction.
+5. The app invalidates the user's note-list cache entries.
+6. The app returns the created note with `201 Created`.
+7. Nonessential work, such as notifications, is placed on the queue for a worker.
 
-- **Cache speed vs. freshness:** Caching reduces latency and database load,
-  but cached data can be stale; invalidate it on writes and use a TTL as a
-  safety net.
-- **Read capacity vs. consistency:** Read replicas increase read capacity, but
-  replication lag can temporarily hide a recent write; route read-after-write
-  requests to the primary when needed.
-- **Simplicity vs. availability:** A single server is easier to operate, but
-  multiple app servers and health checks improve availability at the cost of
-  operational complexity.
-- **Cost vs. reliability:** Redundant instances, replicas, and tested backups
-  improve recovery but increase infrastructure costs.
+## Trade-offs
 
-Avoid a single app-server failure taking down the service by running at least
-two stateless app servers behind a health-checking load balancer. Protect the
-database with automated backups and a tested replica-promotion procedure; a
-replica is not a substitute for an independent backup. Deploy critical
-infrastructure redundantly and monitor it so failures are detected promptly.
+1. **Cache speed versus freshness:** cached lists can briefly be stale. Use
+   short TTLs and invalidate a user's note-list keys after writes; return the
+   newly created note directly in the POST response.
+2. **Read replicas versus consistency:** replicas reduce primary read load but
+   may lag. Route writes and read-after-write requests to the primary when
+   immediate consistency is required.
+3. **One database versus sharding:** a single PostgreSQL primary with a replica
+   is simpler to operate at this estimated scale. Sharding may be needed if
+   measured capacity or storage growth exceeds what a database cluster can
+   handle economically.
+4. **Redundancy versus cost:** multiple app servers, load balancers, and a
+   replica cost more than a single-server design but reduce downtime risk.
+
+## Avoiding single points of failure
+
+- Run the load balancer across redundant instances or zones with health checks.
+- Use at least two stateless app servers across separate availability zones.
+- Configure database replication and documented automated or operator-led
+  promotion of the replica.
+- Run Redis in a highly available configuration; if it is unavailable, bypass
+  the cache and read from the database.
+- Store backups in separate object storage and regularly test restoration.
+- Make queue consumers retry safely and monitor queue depth and failed jobs.
