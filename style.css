@@ -125,3 +125,8 @@ button:disabled {
 .delete-btn:hover:not(:disabled) {
   background: #912018;
 }
+
+.empty {
+  color: #59636e;
+  font-style: italic;
+}
